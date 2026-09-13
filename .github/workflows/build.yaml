@@ -55,7 +55,10 @@ jobs:
           printf '#!/bin/sh\nexec zig ar "$@"\n'     > zig-ar
           printf '#!/bin/sh\nexec zig ranlib "$@"\n' > zig-ranlib
           chmod +x zig-ar zig-ranlib
+          # build with Ninja for the appropriate backend, stripping debuginfo so the binaries aren't huge
           cmake -B build -G Ninja -DCMAKE_SYSTEM_NAME=${{ matrix.system }} \
+            -DCMAKE_C_FLAGS=-g0 -DCMAKE_CXX_FLAGS=-g0 \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.system == 'Linux' && '-Wl,--strip-debug' || '' }}" \
             -DCMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_AR="$PWD/zig-ar" -DCMAKE_RANLIB="$PWD/zig-ranlib" \
