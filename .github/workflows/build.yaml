@@ -1,121 +1,89 @@
-name: Compile pycdc for Windows & Linux
+name: Build pycdc for Windows, Linux, and macOS
 on: workflow_dispatch
 
-jobs:
-  build-job:
-    runs-on: ubuntu-22.04
-      
-    steps:
-      - name: Install mingw-w64
-        run: |
-          sudo apt update
-          sudo apt install -y mingw-w64
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
-      - name: Clone pycdc
-        run: git clone --depth=1 https://github.com/zrax/pycdc
+env:
+  ZIG_VERSION: 0.14.1
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: windows-x86_64, target: x86_64-windows-gnu, system: Windows, os: windows, arch: x86_64,  exe: .exe }
+          - { name: linux-x86_64,   target: x86_64-linux-musl,  system: Linux,   os: linux,   arch: x86_64,  exe: "" }
+          - { name: linux-aarch64,  target: aarch64-linux-musl, system: Linux,   os: linux,   arch: aarch64, exe: "" }
+          - { name: macos-aarch64,  target: aarch64-macos-none, system: Darwin,  os: macos,   arch: aarch64, exe: "" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zrax/pycdc
+          persist-credentials: false
+
+      - uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ${{ matrix.target }}
 
       - name: Compile
-        run: >
-          cd pycdc
-          
-          echo "RELEASE_COMMIT=$(git log -1 --format=%h)" >> ${GITHUB_ENV}
-
-          cmake -DCMAKE_SYSTEM_NAME=Windows
-          -DCMAKE_C_COMPILER=i686-w64-mingw32-gcc
-          -DCMAKE_CXX_COMPILER=i686-w64-mingw32-g++
-          -DCMAKE_FIND_ROOT_PATH=/usr/i686-w64-mingw32
-          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
-          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
-          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
-          -DCMAKE_CXX_STANDARD_LIBRARIES="-static-libgcc -static-libstdc++"
-          .
-          
-          make
-
-      - name: Set release date & time
+        env:
+          CC: "zig cc"
+          CXX: "zig c++"
+        shell: bash
         run: |
-          echo "RELEASE_DATE=$(date -u +%d-%b-%Y)" >> ${GITHUB_ENV}
-          echo "RELEASE_TIME=$(date -u +%H:%M)" >> ${GITHUB_ENV}
+          printf '#!/bin/sh\nexec zig ar "$@"\n'     > zig-ar
+          printf '#!/bin/sh\nexec zig ranlib "$@"\n' > zig-ranlib
+          chmod +x zig-ar zig-ranlib
+          cmake -B build -G Ninja -DCMAKE_SYSTEM_NAME=${{ matrix.system }} \
+            -DCMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
+            -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
+            -DCMAKE_AR="$PWD/zig-ar" -DCMAKE_RANLIB="$PWD/zig-ranlib" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+          install -Dm755 build/pycdc${{ matrix.exe }}  "dist/pycdc-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.exe }}"
+          install -Dm755 build/pycdas${{ matrix.exe }} "dist/pycdas-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.exe }}"
 
-#       - name: Upload artifact
-#         uses: actions/upload-artifact@v3
-#         with:
-#           name: pycdc
-#           path: |
-#             pycdc/pycdc.exe
-#             pycdc/pycdas.exe
-            
-      - name: Create release Windows
-        uses: ncipollo/release-action@v1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: Decompyle++ ${{ env.RELEASE_DATE }}
-          tag: build-${{ env.RELEASE_DATE }}-${{ env.RELEASE_COMMIT }}
-          body: Compiled on ${{ env.RELEASE_DATE }} at ${{ env.RELEASE_TIME }} GMT, pycdc commit ${{ env.RELEASE_COMMIT }}
-          artifacts: "pycdc/pycdc.exe,pycdc/pycdas.exe"
-          token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: true
-          draft: true
+          name: ${{ matrix.name }}
+          path: dist/*
 
-
-      - name: Setup latest Alpine Linux x86_64
-        uses: jirutka/setup-alpine@v1
-        with:
-          packages: >
-            alpine-sdk
-            cmake
-            python3
-        
-      - name: Compile for Linux x86_64       
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - run: git clone --depth=1 https://github.com/zrax/pycdc
+      - name: Copy to dist
         run: |
-          cd pycdc
-          git clean -d -f -x
-          sed -i '/target_link_libraries(pycdas pycxx)/c target_link_libraries(pycdas pycxx -static)' CMakeLists.txt
-          sed -i '/target_link_libraries(pycdc pycxx)/c target_link_libraries(pycdc pycxx -static)' CMakeLists.txt
-          cmake .
-          make
-          mv pycdc pycdc.x86_64
-          mv pycdas pycdas.x86_64
-        shell: alpine.sh {0}
+          mkdir dist
+          mv windows-x86_64/* linux-x86_64/* linux-aarch64/* macos-aarch64/* dist/
 
-      - name: Create release Linux x86_64
-        uses: ncipollo/release-action@v1
-        with:
-          name: Decompyle++ ${{ env.RELEASE_DATE }}
-          tag: build-${{ env.RELEASE_DATE }}-${{ env.RELEASE_COMMIT }}
-          body: Compiled on ${{ env.RELEASE_DATE }} at ${{ env.RELEASE_TIME }} GMT, pycdc commit ${{ env.RELEASE_COMMIT }}
-          artifacts: "pycdc/pycdc.x86_64,pycdc/pycdas.x86_64"
-          token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: true
-          draft: true
-
-      - name: Setup latest Alpine Linux aarch64
-        uses: jirutka/setup-alpine@v1        
-        with:
-          arch: aarch64
-          packages: >
-            alpine-sdk
-            cmake
-            python3
-
-      - name: Compile for Linux AArch64       
+      - name: Set release metadata
         run: |
-          cd pycdc
-          git clean -d -f -x
-          sed -i '/target_link_libraries(pycdas pycxx)/c target_link_libraries(pycdas pycxx -static)' CMakeLists.txt
-          sed -i '/target_link_libraries(pycdc pycxx)/c target_link_libraries(pycdc pycxx -static)' CMakeLists.txt
-          cmake .
-          make
-          mv pycdc pycdc.aarch64
-          mv pycdas pycdas.aarch64
-        shell: alpine.sh {0}        
+          echo "REV=$(git -C pycdc rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          echo "DATE=$(date -u +%d-%b-%Y)" >> "$GITHUB_ENV"
 
-      - name: Create release Linux aarch64
-        uses: ncipollo/release-action@v1
-        with:
-          name: Decompyle++ ${{ env.RELEASE_DATE }}
-          tag: build-${{ env.RELEASE_DATE }}-${{ env.RELEASE_COMMIT }}
-          body: Compiled on ${{ env.RELEASE_DATE }} at ${{ env.RELEASE_TIME }} GMT, pycdc commit ${{ env.RELEASE_COMMIT }}
-          artifacts: "pycdc/pycdc.aarch64,pycdc/pycdas.aarch64"
-          token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: true
-          draft: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="build-${{ env.DATE }}-${{ env.REV }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" -t "Decompyle++ ${{ env.DATE }}" \
+              -n "Compiled on ${{ env.DATE }} GMT, pycdc commit ${{ env.REV }}" \
+              -d dist/*
+          fi
